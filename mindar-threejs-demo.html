@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>MindAR + Three.js Demo</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #0a0a0a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  #container {
+    width: 100%;
+    height: 100%;
+    position: relative;
+  }
+
+  /* Top overlay: instructions + target preview */
+  #hud {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    padding-top: calc(12px + env(safe-area-inset-top, 0px));
+    background: linear-gradient(to bottom, rgba(0,0,0,0.65), transparent);
+    pointer-events: none;
+  }
+
+  #hud .title {
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+  }
+
+  #hud .subtitle {
+    color: #c9c9c9;
+    font-size: 11px;
+    margin-top: 2px;
+  }
+
+  #target-preview {
+    pointer-events: auto;
+    width: 56px;
+    height: 56px;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 2px solid rgba(255,255,255,0.85);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+    flex-shrink: 0;
+    margin-left: 12px;
+    cursor: pointer;
+    background: #fff;
+  }
+
+  #target-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  /* Scanning status pill */
+  #status-pill {
+    position: fixed;
+    top: calc(84px + env(safe-area-inset-top, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    background: rgba(20,20,20,0.75);
+    color: #fff;
+    font-size: 12px;
+    padding: 7px 14px;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    transition: opacity 0.3s ease;
+  }
+
+  #status-pill .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ff5252;
+    box-shadow: 0 0 6px #ff5252;
+  }
+
+  #status-pill.found .dot {
+    background: #4caf50;
+    box-shadow: 0 0 6px #4caf50;
+  }
+
+  #status-pill.found {
+    background: rgba(30,90,40,0.75);
+  }
+
+  /* Fullscreen target viewer (tap the thumbnail) */
+  #target-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: rgba(0,0,0,0.92);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+
+  #target-modal.open { display: flex; }
+
+  #target-modal img {
+    max-width: 90%;
+    max-height: 70%;
+    border-radius: 8px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.6);
+  }
+
+  #target-modal p {
+    color: #ddd;
+    font-size: 13px;
+    text-align: center;
+    margin-top: 16px;
+    max-width: 320px;
+    line-height: 1.5;
+  }
+
+  #target-modal button {
+    margin-top: 18px;
+    background: #fff;
+    color: #111;
+    border: none;
+    padding: 10px 22px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  /* Bottom hint */
+  #bottom-hint {
+    position: fixed;
+    bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    color: rgba(255,255,255,0.75);
+    font-size: 11px;
+    text-align: center;
+    pointer-events: none;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+  }
+
+  #loading {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: #0a0a0a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    color: #fff;
+    gap: 14px;
+  }
+
+  #loading .spinner {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.2);
+    border-top-color: #4fd1c5;
+    animation: spin 0.9s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #loading .msg {
+    font-size: 13px;
+    color: #bbb;
+  }
+
+  #error-box {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    background: rgba(10,10,10,0.97);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 30px;
+    box-sizing: border-box;
+  }
+
+  #error-box.show { display: flex; }
+
+  #error-box .box {
+    color: #eee;
+    font-size: 13px;
+    text-align: center;
+    max-width: 340px;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <div class="msg">Loading AR engine…</div>
+</div>
+
+<div id="error-box">
+  <div class="box">
+    <strong>Camera / AR could not start.</strong><br/>
+    This demo needs camera access over HTTPS (or localhost). Open it on a phone or desktop browser, allow camera access, and make sure you're not in an iframe preview.
+  </div>
+</div>
+
+<div id="hud">
+  <div>
+    <div class="title">MindAR + Three.js Demo</div>
+    <div class="subtitle" id="subtitle">Point your camera at the target image →</div>
+  </div>
+  <div id="target-preview">
+    <img src="https://cdn.jsdelivr.net/gh/hiukim/mind-ar-js@1.2.5/examples/image-tracking/assets/card-example/card.png" alt="target" />
+  </div>
+</div>
+
+<div id="status-pill">
+  <div class="dot"></div>
+  <span id="status-text">Searching for target…</span>
+</div>
+
+<div id="bottom-hint">Tap the thumbnail above to view/print the target image</div>
+
+<div id="target-modal">
+  <img src="https://cdn.jsdelivr.net/gh/hiukim/mind-ar-js@1.2.5/examples/image-tracking/assets/card-example/card.png" alt="target full" />
+  <p>Point your camera at this image (or display it on another screen) to trigger the AR scene.</p>
+  <button id="close-modal">Close</button>
+</div>
+
+<div id="container"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"></script>
+
+<script>
+(function () {
+  const targetPreview = document.getElementById('target-preview');
+  const targetModal = document.getElementById('target-modal');
+  const closeModal = document.getElementById('close-modal');
+  const statusPill = document.getElementById('status-pill');
+  const statusText = document.getElementById('status-text');
+  const loading = document.getElementById('loading');
+  const errorBox = document.getElementById('error-box');
+
+  targetPreview.addEventListener('click', () => targetModal.classList.add('open'));
+  closeModal.addEventListener('click', () => targetModal.classList.remove('open'));
+
+  const MIND_TARGET =
+    'https://cdn.jsdelivr.net/gh/hiukim/mind-ar-js@1.2.5/examples/image-tracking/assets/card-example/card.mind';
+
+  const start = async () => {
+    try {
+      const mindarThree = new window.MINDAR.IMAGE.MindARThree({
+        container: document.querySelector('#container'),
+        imageTargetSrc: MIND_TARGET,
+        uiLoading: 'no',
+        uiScanning: 'no',
+        uiError: 'no'
+      });
+
+      const { renderer, scene, camera } = mindarThree;
+
+      // ---- Lighting ----
+      const hemiLight = new THREE.HemisphereLight(0xffffff, 0x223322, 1.1);
+      scene.add(hemiLight);
+      const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+      dirLight.position.set(1, 2, 1);
+      scene.add(dirLight);
+
+      // ---- Anchor / group attached to the tracked image ----
+      const anchor = mindarThree.addAnchor(0);
+      const root = new THREE.Group();
+      anchor.group.add(root);
+
+      // Placeholder "creature" core — stands in for the dragon model
+      const coreGeo = new THREE.IcosahedronGeometry(0.14, 1);
+      const coreMat = new THREE.MeshStandardMaterial({
+        color: 0x2ecc71,
+        emissive: 0x0b3d1f,
+        metalness: 0.3,
+        roughness: 0.35,
+        flatShading: true
+      });
+      const core = new THREE.Mesh(coreGeo, coreMat);
+      core.position.set(0, 0.05, 0);
+      root.add(core);
+
+      // Small "horns" so the placeholder reads as a creature, not a gem
+      const hornGeo = new THREE.ConeGeometry(0.02, 0.07, 6);
+      const hornMat = new THREE.MeshStandardMaterial({ color: 0x1e8449, flatShading: true });
+      const hornL = new THREE.Mesh(hornGeo, hornMat);
+      hornL.position.set(-0.05, 0.16, 0.02);
+      hornL.rotation.z = 0.3;
+      const hornR = hornL.clone();
+      hornR.position.x = 0.05;
+      hornR.rotation.z = -0.3;
+      root.add(hornL, hornR);
+
+      // Orbiting cubes
+      const orbitGroup = new THREE.Group();
+      root.add(orbitGroup);
+      const cubeColors = [0xff6b6b, 0xffd93d, 0x6bcBef, 0xff9f43];
+      const cubes = [];
+      const cubeCount = 4;
+      for (let i = 0; i < cubeCount; i++) {
+        const size = 0.028;
+        const geo = new THREE.BoxGeometry(size, size, size);
+        const mat = new THREE.MeshStandardMaterial({
+          color: cubeColors[i % cubeColors.length],
+          metalness: 0.2,
+          roughness: 0.4
+        });
+        const cube = new THREE.Mesh(geo, mat);
+        const angle = (i / cubeCount) * Math.PI * 2;
+        cube.userData = { angle, radius: 0.24, speed: 0.6 + i * 0.08, yOff: 0.05 };
+        orbitGroup.add(cube);
+        cubes.push(cube);
+      }
+
+      // Particle field
+      const particleCount = 60;
+      const positions = new Float32Array(particleCount * 3);
+      for (let i = 0; i < particleCount; i++) {
+        const r = 0.15 + Math.random() * 0.25;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.random() * Math.PI;
+        positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+        positions[i * 3 + 1] = r * Math.cos(phi) * 0.6 + 0.08;
+        positions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+      }
+      const particleGeo = new THREE.BufferGeometry();
+      particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const particleMat = new THREE.PointsMaterial({
+        color: 0x8be9fd,
+        size: 0.008,
+        transparent: true,
+        opacity: 0.85
+      });
+      const particles = new THREE.Points(particleGeo, particleMat);
+      root.add(particles);
+
+      // Soft shadow-like disc under the creature
+      const discGeo = new THREE.CircleGeometry(0.16, 24);
+      const discMat = new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        transparent: true,
+        opacity: 0.22
+      });
+      const disc = new THREE.Mesh(discGeo, discMat);
+      disc.rotation.x = -Math.PI / 2;
+      disc.position.y = -0.04;
+      root.add(disc);
+
+      // ---- Target found / lost events ----
+      anchor.onTargetFound = () => {
+        statusPill.classList.add('found');
+        statusText.textContent = 'Target found';
+      };
+      anchor.onTargetLost = () => {
+        statusPill.classList.remove('found');
+        statusText.textContent = 'Searching for target…';
+      };
+
+      await mindarThree.start();
+      loading.style.display = 'none';
+
+      const clock = new THREE.Clock();
+      renderer.setAnimationLoop(() => {
+        const t = clock.getElapsedTime();
+
+        core.rotation.y = t * 0.8;
+        core.rotation.x = Math.sin(t * 0.5) * 0.15;
+        core.position.y = 0.05 + Math.sin(t * 1.4) * 0.012;
+
+        orbitGroup.rotation.y = t * 0.3;
+        cubes.forEach((cube) => {
+          const { angle, radius, speed, yOff } = cube.userData;
+          const a = angle + t * speed;
+          cube.position.set(
+            Math.cos(a) * radius,
+            yOff + Math.sin(t * 2 + angle) * 0.02,
+            Math.sin(a) * radius
+          );
+          cube.rotation.x = t * 1.5;
+          cube.rotation.y = t * 1.2;
+        });
+
+        particles.rotation.y = t * 0.15;
+
+        renderer.render(scene, camera);
+      });
+    } catch (err) {
+      console.error(err);
+      loading.style.display = 'none';
+      errorBox.classList.add('show');
+    }
+  };
+
+  start();
+})();
+</script>
+</body>
+</html>
+   <script src="https://cdn.jsdelivr.net/npm/three@0.143.0/build/three.min.js"></   <script src="https://cdn.jsdelivr.net/npm/mindar-image-three.prod.js"></script>   <script src="http://localhost:PORT"></script>
