@@ -11,14 +11,23 @@
     width: 100%;
     height: 100%;
     overflow: hidden;
-    background: #0a0a0a;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  html {
+    background: #0a0a0a;
+  }
+
+  body {
+    background: transparent;
   }
 
   #container {
     width: 100%;
     height: 100%;
     position: relative;
+    z-index: 0;
+    background: transparent;
   }
 
   /* Top overlay: instructions + target preview */
@@ -214,14 +223,49 @@
     max-width: 340px;
     line-height: 1.6;
   }
+
+  /* Non-blocking notice (e.g. model failed to load) */
+  #model-warning {
+    position: fixed;
+    top: calc(140px + env(safe-area-inset-top, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    background: rgba(120,60,20,0.85);
+    color: #fff;
+    font-size: 11px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    max-width: 260px;
+    text-align: center;
+    display: none;
+    pointer-events: none;
+  }
+
+  #model-warning.show { display: block; }
+
+  /* Asset credit */
+  #credit {
+    position: fixed;
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    right: 10px;
+    z-index: 20;
+    color: rgba(255,255,255,0.45);
+    font-size: 9px;
+    text-align: right;
+    pointer-events: none;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+  }
 </style>
 </head>
 <body>
 
 <div id="loading">
   <div class="spinner"></div>
-  <div class="msg">Loading AR engine…</div>
+  <div class="msg" id="loading-msg">Loading AR engine…</div>
 </div>
+
+<div id="model-warning"></div>
 
 <div id="error-box">
   <div class="box">
@@ -247,6 +291,8 @@
 
 <div id="bottom-hint">Tap the thumbnail above to view/print the target image</div>
 
+<div id="credit">Red Dragon by Tomek Zamojski (CC-BY) via Poly Pizza</div>
+
 <div id="target-modal">
   <img src="https://cdn.jsdelivr.net/gh/hiukim/mind-ar-js@1.2.5/examples/image-tracking/assets/card-example/card.png" alt="target full" />
   <p>Point your camera at this image (or display it on another screen) to trigger the AR scene.</p>
@@ -255,18 +301,81 @@
 
 <div id="container"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"></script>
 
-<script>
-(function () {
+<script type="module">
+  import * as THREE from 'three';
+  import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+  import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+  // ==========================================================================
+  // CONFIG — every tunable in one place
+  // ==========================================================================
+  const CONFIG = {
+    MODEL_URL: './assets/dragon.glb',
+    TARGET_SIZE: 0.8,             // largest model dimension, in card-width units
+
+    // orientGroup: aligns the (Y-up) model so its up axis becomes the card
+    // normal (+Z). FORWARD_OFFSET is an extra spin around the model's OWN up
+    // axis to line the nose up with the flight direction — tweak this first
+    // if the dragon flies sideways or backwards.
+    ROTATION: { x: Math.PI / 2, y: 0, z: 0 },
+    FORWARD_OFFSET: Math.PI / 2,
+
+    // Flight path, in the anchor's card-plane (XY) + card-normal (Z) frame
+    FLIGHT_RADIUS: 0.6,
+    FLIGHT_HEIGHT: 0.3,
+    LAP_SECONDS: 8,
+    BANK_ANGLE: 0.3,             // roll into the turn, radians
+
+    // Procedural-animation axes in RAW model space. Leave any of these null
+    // to auto-guess from the bounding box (longest = body, mid = span,
+    // shortest = up) — but for dragon.glb specifically that guess is WRONG:
+    // its bbox is x=17.0 (symmetric about 0 -> wingspan), z=15.5 (asymmetric
+    // -9.46..+6.09 -> nose-to-tail), y=5.9 (shortest -> up), measured directly
+    // from the file's accessor bounds. So these are hardcoded for this asset;
+    // set back to null if you swap in a different GLB.
+    BODY_AXIS: 'z',              // 'x' | 'y' | 'z' — nose-to-tail
+    SPAN_AXIS: 'x',              // 'x' | 'y' | 'z' — wingtip-to-wingtip
+    UP_AXIS: 'y',                // 'x' | 'y' | 'z' — model's own up
+    // Tail is on the -Z side (small eye/horn-like primitives cluster near
+    // z=+5..6, i.e. the head is at +Z) — inferred from primitive bounds, not
+    // 100% certain. Flip this (and re-check with CONFIG.DEBUG) if the tail
+    // sways at the dragon's head instead.
+    TAIL_SIGN: -1,                // +1 if the tail is on the +BODY_AXIS side, else -1
+
+    WING_START: 0.18,            // fraction of half-span where the wing hinge starts
+    FLAP_SPEED: 1.2 * Math.PI * 2, // ~1.2 flaps/sec
+    FLAP_AMP: 0.6,                // radians
+
+    TAIL_START: 0.35,            // fraction of half-length where the tail starts swaying
+    TAIL_AMP_FRACTION: 0.08,     // sway amplitude, as a fraction of half-length
+
+    BODY_BOB_FRACTION: 0.02,     // body bob, as a fraction of model height
+
+    DEBUG: false,                // AxesHelper + Box3Helper + axis guess logging
+  };
+
+  // ==========================================================================
+  // DOM wiring (unchanged UI: thumbnail, modal, status pill, error box)
+  // ==========================================================================
   const targetPreview = document.getElementById('target-preview');
   const targetModal = document.getElementById('target-modal');
   const closeModal = document.getElementById('close-modal');
   const statusPill = document.getElementById('status-pill');
   const statusText = document.getElementById('status-text');
   const loading = document.getElementById('loading');
+  const loadingMsg = document.getElementById('loading-msg');
   const errorBox = document.getElementById('error-box');
+  const modelWarning = document.getElementById('model-warning');
 
   targetPreview.addEventListener('click', () => targetModal.classList.add('open'));
   closeModal.addEventListener('click', () => targetModal.classList.remove('open'));
@@ -274,6 +383,281 @@
   const MIND_TARGET =
     'https://cdn.jsdelivr.net/gh/hiukim/mind-ar-js@1.2.5/examples/image-tracking/assets/card-example/card.mind';
 
+  function showModelWarning(message) {
+    modelWarning.textContent = message;
+    modelWarning.classList.add('show');
+    setTimeout(() => modelWarning.classList.remove('show'), 6000);
+  }
+
+  // ==========================================================================
+  // Placeholder "creature" — fallback if the GLB fails to load
+  // ==========================================================================
+  function createPlaceholder() {
+    const group = new THREE.Group();
+
+    const coreGeo = new THREE.IcosahedronGeometry(0.14, 1);
+    const coreMat = new THREE.MeshStandardMaterial({
+      color: 0x2ecc71,
+      emissive: 0x0b3d1f,
+      metalness: 0.3,
+      roughness: 0.35,
+      flatShading: true
+    });
+    const core = new THREE.Mesh(coreGeo, coreMat);
+    core.position.set(0, 0.05, 0);
+    group.add(core);
+
+    const hornGeo = new THREE.ConeGeometry(0.02, 0.07, 6);
+    const hornMat = new THREE.MeshStandardMaterial({ color: 0x1e8449, flatShading: true });
+    const hornL = new THREE.Mesh(hornGeo, hornMat);
+    hornL.position.set(-0.05, 0.16, 0.02);
+    hornL.rotation.z = 0.3;
+    const hornR = hornL.clone();
+    hornR.position.x = 0.05;
+    hornR.rotation.z = -0.3;
+    group.add(hornL, hornR);
+
+    const orbitGroup = new THREE.Group();
+    group.add(orbitGroup);
+    const cubeColors = [0xff6b6b, 0xffd93d, 0x6bcBef, 0xff9f43];
+    const cubes = [];
+    const cubeCount = 4;
+    for (let i = 0; i < cubeCount; i++) {
+      const size = 0.028;
+      const geo = new THREE.BoxGeometry(size, size, size);
+      const mat = new THREE.MeshStandardMaterial({
+        color: cubeColors[i % cubeColors.length],
+        metalness: 0.2,
+        roughness: 0.4
+      });
+      const cube = new THREE.Mesh(geo, mat);
+      const angle = (i / cubeCount) * Math.PI * 2;
+      cube.userData = { angle, radius: 0.24, speed: 0.6 + i * 0.08, yOff: 0.05 };
+      orbitGroup.add(cube);
+      cubes.push(cube);
+    }
+
+    function update(elapsed) {
+      core.rotation.y = elapsed * 0.8;
+      core.rotation.x = Math.sin(elapsed * 0.5) * 0.15;
+      core.position.y = 0.05 + Math.sin(elapsed * 1.4) * 0.012;
+
+      orbitGroup.rotation.y = elapsed * 0.3;
+      cubes.forEach((cube) => {
+        const { angle, radius, speed, yOff } = cube.userData;
+        const a = angle + elapsed * speed;
+        cube.position.set(
+          Math.cos(a) * radius,
+          yOff + Math.sin(elapsed * 2 + angle) * 0.02,
+          Math.sin(a) * radius
+        );
+        cube.rotation.x = elapsed * 1.5;
+        cube.rotation.y = elapsed * 1.2;
+      });
+    }
+
+    return { group, update };
+  }
+
+  // ==========================================================================
+  // Dragon procedural vertex animation (material.onBeforeCompile)
+  // ==========================================================================
+  function patchDragonMaterial(material, uniforms, axes) {
+    const spanC = axes.SPAN_AXIS;
+    const bodyC = axes.BODY_AXIS;
+    const upC = axes.UP_AXIS;
+
+    material.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, uniforms);
+
+      shader.vertexShader =
+        `
+        uniform float uTime;
+        uniform float uFlapSpeed;
+        uniform float uFlapAmp;
+        uniform float uWingStart;
+        uniform float uHalfSpan;
+        uniform float uTailStart;
+        uniform float uTailAmp;
+        uniform float uHalfLength;
+        uniform float uTailSign;
+        uniform float uBobAmp;
+        ` + shader.vertexShader;
+
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        `
+        #include <begin_vertex>
+        {
+          // Wings: rotate around a hinge parallel to the body axis, past WING_START.
+          float spanCoord = transformed.${spanC};
+          float sgn = spanCoord >= 0.0 ? 1.0 : -1.0;
+          float absSpan = abs(spanCoord) / max(uHalfSpan, 1e-5);
+          float wingWeight = smoothstep(uWingStart, 1.0, absSpan);
+          // sgn mirrors the rotation so both wings flap the SAME physical
+          // direction (up together / down together) instead of opposing.
+          float flapAngle = sin(uTime * uFlapSpeed) * uFlapAmp * wingWeight * sgn;
+          float hinge = sgn * uWingStart * uHalfSpan;
+          float localSpan = spanCoord - hinge;
+          float localUp = transformed.${upC};
+          float cA = cos(flapAngle);
+          float sA = sin(flapAngle);
+          transformed.${spanC} = hinge + localSpan * cA - localUp * sA;
+          transformed.${upC} = localSpan * sA + localUp * cA;
+
+          // Tail: travelling sideways wave, past TAIL_START on the tail side.
+          float tailCoord = transformed.${bodyC} * uTailSign;
+          float tailFrac = tailCoord / max(uHalfLength, 1e-5);
+          float tailWeight = smoothstep(uTailStart, 1.0, tailFrac);
+          float distAlongTail = max(tailFrac - uTailStart, 0.0) * uHalfLength;
+          float sway = sin(uTime * 2.0 - distAlongTail * 6.0) * uTailAmp * tailWeight;
+          transformed.${spanC} += sway;
+
+          // Body bobs opposite the wing stroke (wings down -> body up).
+          transformed.${upC} += -sin(uTime * uFlapSpeed) * uBobAmp;
+        }
+        `
+      );
+    };
+    material.needsUpdate = true;
+  }
+
+  function buildDragonModel(gltf) {
+    gltf.scene.updateMatrixWorld(true);
+
+    // Group meshes by material and bake each mesh's transform into its
+    // geometry so every vertex ends up in one shared coordinate frame
+    // (the gltf scene root), whether or not the merge below succeeds.
+    const byMaterial = new Map();
+    gltf.scene.traverse((child) => {
+      if (!child.isMesh) return;
+      const geometry = child.geometry.clone();
+      geometry.applyMatrix4(child.matrixWorld);
+      const material = Array.isArray(child.material) ? child.material[0] : child.material;
+      if (!byMaterial.has(material)) byMaterial.set(material, []);
+      byMaterial.get(material).push(geometry);
+    });
+
+    const model = new THREE.Group();
+    const meshes = [];
+
+    byMaterial.forEach((geometries, material) => {
+      const clonedMat = material.clone();
+      let merged = null;
+      if (geometries.length > 1) {
+        merged = mergeGeometries(geometries, false);
+        if (!merged) {
+          console.warn('[dragon] mergeGeometries failed for a material group; keeping meshes separate');
+        }
+      }
+      if (merged) {
+        const mesh = new THREE.Mesh(merged, clonedMat);
+        model.add(mesh);
+        meshes.push(mesh);
+      } else {
+        geometries.forEach((geo) => {
+          const mesh = new THREE.Mesh(geo, clonedMat);
+          model.add(mesh);
+          meshes.push(mesh);
+        });
+      }
+    });
+
+    if (meshes.length === 0) {
+      throw new Error('GLB contained no meshes');
+    }
+
+    // ---- Bounding box in raw (pre-normalization) model space ----
+    const box = new THREE.Box3();
+    meshes.forEach((mesh) => {
+      mesh.geometry.computeBoundingBox();
+      box.union(mesh.geometry.boundingBox);
+    });
+    const center = box.getCenter(new THREE.Vector3());
+    meshes.forEach((mesh) => mesh.geometry.translate(-center.x, -center.y, -center.z));
+    box.min.sub(center);
+    box.max.sub(center);
+
+    const size = box.getSize(new THREE.Vector3());
+    const dims = { x: size.x, y: size.y, z: size.z };
+
+    // ---- Guess BODY / SPAN / UP axes from the bounding box ----
+    const sortedAxes = ['x', 'y', 'z'].sort((a, b) => dims[b] - dims[a]);
+    const BODY_AXIS = CONFIG.BODY_AXIS || sortedAxes[0];
+    const SPAN_AXIS = CONFIG.SPAN_AXIS || sortedAxes[1];
+    const UP_AXIS = CONFIG.UP_AXIS || sortedAxes[2];
+    const TAIL_SIGN = CONFIG.TAIL_SIGN;
+
+    const halfSpan = dims[SPAN_AXIS] / 2;
+    const halfLength = dims[BODY_AXIS] / 2;
+    const heightRaw = dims[UP_AXIS];
+
+    if (CONFIG.DEBUG) {
+      console.log('[dragon] guessed axes', { BODY_AXIS, SPAN_AXIS, UP_AXIS, TAIL_SIGN, dims, halfSpan, halfLength, heightRaw });
+    }
+
+    // ---- Shared animation uniforms (one set drives every material) ----
+    const uniforms = {
+      uTime: { value: 0 },
+      uFlapSpeed: { value: CONFIG.FLAP_SPEED },
+      uFlapAmp: { value: CONFIG.FLAP_AMP },
+      uWingStart: { value: CONFIG.WING_START },
+      uHalfSpan: { value: halfSpan },
+      uTailStart: { value: CONFIG.TAIL_START },
+      uTailAmp: { value: CONFIG.TAIL_AMP_FRACTION * halfLength },
+      uHalfLength: { value: halfLength },
+      uTailSign: { value: TAIL_SIGN },
+      uBobAmp: { value: CONFIG.BODY_BOB_FRACTION * heightRaw },
+    };
+
+    meshes.forEach((mesh) => {
+      patchDragonMaterial(mesh.material, uniforms, { BODY_AXIS, SPAN_AXIS, UP_AXIS });
+      // Shadow maps aren't enabled in this scene; disable casting explicitly
+      // so a patched customDepthMaterial is never required.
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+    });
+
+    // ---- Fit to TARGET_SIZE and orient ----
+    const maxDim = Math.max(dims.x, dims.y, dims.z);
+    const scale = CONFIG.TARGET_SIZE / maxDim;
+    model.scale.setScalar(scale);
+    model.rotation[UP_AXIS] = CONFIG.FORWARD_OFFSET;
+
+    if (CONFIG.DEBUG) {
+      model.add(new THREE.AxesHelper(maxDim * 0.6));
+      model.add(new THREE.Box3Helper(box, 0xffff00));
+    }
+
+    function update(elapsed) {
+      uniforms.uTime.value = elapsed;
+    }
+
+    return { group: model, update };
+  }
+
+  function loadDragonModel() {
+    return new Promise((resolve) => {
+      const loader = new GLTFLoader();
+      loader.load(
+        CONFIG.MODEL_URL,
+        (gltf) => resolve({ success: true, gltf }),
+        (xhr) => {
+          if (xhr.lengthComputable && xhr.total > 0) {
+            const pct = Math.round((xhr.loaded / xhr.total) * 100);
+            loadingMsg.textContent = `Loading dragon model… ${pct}%`;
+          } else {
+            loadingMsg.textContent = 'Loading dragon model…';
+          }
+        },
+        (err) => resolve({ success: false, error: err })
+      );
+    });
+  }
+
+  // ==========================================================================
+  // Main
+  // ==========================================================================
   const start = async () => {
     try {
       const mindarThree = new window.MINDAR.IMAGE.MindARThree({
@@ -285,9 +669,14 @@
       });
 
       const { renderer, scene, camera } = mindarThree;
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      // Let the camera feed show through: scene.background stays null (never
+      // set), and the renderer (already created with alpha:true by MindAR)
+      // must clear to a fully transparent black, not opaque.
+      renderer.setClearColor(0x000000, 0);
 
-      // ---- Lighting ----
-      const hemiLight = new THREE.HemisphereLight(0xffffff, 0x223322, 1.1);
+      // ---- Lighting (tuned for PBR materials) ----
+      const hemiLight = new THREE.HemisphereLight(0xffffff, 0x3a3630, 1.1);
       scene.add(hemiLight);
       const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
       dirLight.position.set(1, 2, 1);
@@ -298,52 +687,27 @@
       const root = new THREE.Group();
       anchor.group.add(root);
 
-      // Placeholder "creature" core — stands in for the dragon model
-      const coreGeo = new THREE.IcosahedronGeometry(0.14, 1);
-      const coreMat = new THREE.MeshStandardMaterial({
-        color: 0x2ecc71,
-        emissive: 0x0b3d1f,
-        metalness: 0.3,
-        roughness: 0.35,
-        flatShading: true
-      });
-      const core = new THREE.Mesh(coreGeo, coreMat);
-      core.position.set(0, 0.05, 0);
-      root.add(core);
+      // Flight rig: flightPivot circles the card center; orientGroup aligns
+      // the (Y-up) model to the card-normal (+Z) frame.
+      const flightPivot = new THREE.Group();
+      anchor.group.add(flightPivot);
+      const orientGroup = new THREE.Group();
+      orientGroup.rotation.set(CONFIG.ROTATION.x, CONFIG.ROTATION.y, CONFIG.ROTATION.z);
+      flightPivot.add(orientGroup);
 
-      // Small "horns" so the placeholder reads as a creature, not a gem
-      const hornGeo = new THREE.ConeGeometry(0.02, 0.07, 6);
-      const hornMat = new THREE.MeshStandardMaterial({ color: 0x1e8449, flatShading: true });
-      const hornL = new THREE.Mesh(hornGeo, hornMat);
-      hornL.position.set(-0.05, 0.16, 0.02);
-      hornL.rotation.z = 0.3;
-      const hornR = hornL.clone();
-      hornR.position.x = 0.05;
-      hornR.rotation.z = -0.3;
-      root.add(hornL, hornR);
-
-      // Orbiting cubes
-      const orbitGroup = new THREE.Group();
-      root.add(orbitGroup);
-      const cubeColors = [0xff6b6b, 0xffd93d, 0x6bcBef, 0xff9f43];
-      const cubes = [];
-      const cubeCount = 4;
-      for (let i = 0; i < cubeCount; i++) {
-        const size = 0.028;
-        const geo = new THREE.BoxGeometry(size, size, size);
-        const mat = new THREE.MeshStandardMaterial({
-          color: cubeColors[i % cubeColors.length],
-          metalness: 0.2,
-          roughness: 0.4
-        });
-        const cube = new THREE.Mesh(geo, mat);
-        const angle = (i / cubeCount) * Math.PI * 2;
-        cube.userData = { angle, radius: 0.24, speed: 0.6 + i * 0.08, yOff: 0.05 };
-        orbitGroup.add(cube);
-        cubes.push(cube);
+      function updateFlight(elapsed) {
+        const theta = (elapsed / CONFIG.LAP_SECONDS) * Math.PI * 2;
+        flightPivot.position.set(
+          Math.cos(theta) * CONFIG.FLIGHT_RADIUS,
+          Math.sin(theta) * CONFIG.FLIGHT_RADIUS,
+          CONFIG.FLIGHT_HEIGHT
+        );
+        const heading = theta + Math.PI / 2;
+        flightPivot.quaternion.setFromEuler(new THREE.Euler(0, 0, heading));
+        flightPivot.rotateX(CONFIG.BANK_ANGLE);
       }
 
-      // Particle field
+      // Particle field (kept as-is)
       const particleCount = 60;
       const positions = new Float32Array(particleCount * 3);
       for (let i = 0; i < particleCount; i++) {
@@ -365,7 +729,7 @@
       const particles = new THREE.Points(particleGeo, particleMat);
       root.add(particles);
 
-      // Soft shadow-like disc under the creature
+      // Soft shadow-like disc under the creature (kept as-is)
       const discGeo = new THREE.CircleGeometry(0.16, 24);
       const discMat = new THREE.MeshBasicMaterial({
         color: 0x000000,
@@ -378,40 +742,51 @@
       root.add(disc);
 
       // ---- Target found / lost events ----
+      let targetFound = false;
       anchor.onTargetFound = () => {
+        targetFound = true;
         statusPill.classList.add('found');
         statusText.textContent = 'Target found';
       };
       anchor.onTargetLost = () => {
+        targetFound = false;
         statusPill.classList.remove('found');
         statusText.textContent = 'Searching for target…';
       };
 
-      await mindarThree.start();
+      // ---- Kick off MindAR start + model load concurrently ----
+      const [, modelResult] = await Promise.all([
+        mindarThree.start(),
+        loadDragonModel()
+      ]);
+
+      let activeModel;
+      if (modelResult.success) {
+        try {
+          activeModel = buildDragonModel(modelResult.gltf);
+        } catch (err) {
+          console.error('[dragon] failed to process model:', err);
+          showModelWarning('Dragon model could not be processed — showing placeholder.');
+          activeModel = createPlaceholder();
+        }
+      } else {
+        console.error('[dragon] failed to load model:', modelResult.error);
+        showModelWarning('Dragon model failed to load — showing placeholder.');
+        activeModel = createPlaceholder();
+      }
+      orientGroup.add(activeModel.group);
+
       loading.style.display = 'none';
 
+      let elapsed = 0;
       const clock = new THREE.Clock();
       renderer.setAnimationLoop(() => {
-        const t = clock.getElapsedTime();
+        const delta = clock.getDelta();
+        if (targetFound) elapsed += delta;
 
-        core.rotation.y = t * 0.8;
-        core.rotation.x = Math.sin(t * 0.5) * 0.15;
-        core.position.y = 0.05 + Math.sin(t * 1.4) * 0.012;
-
-        orbitGroup.rotation.y = t * 0.3;
-        cubes.forEach((cube) => {
-          const { angle, radius, speed, yOff } = cube.userData;
-          const a = angle + t * speed;
-          cube.position.set(
-            Math.cos(a) * radius,
-            yOff + Math.sin(t * 2 + angle) * 0.02,
-            Math.sin(a) * radius
-          );
-          cube.rotation.x = t * 1.5;
-          cube.rotation.y = t * 1.2;
-        });
-
-        particles.rotation.y = t * 0.15;
+        updateFlight(elapsed);
+        activeModel.update(elapsed);
+        particles.rotation.y = elapsed * 0.15;
 
         renderer.render(scene, camera);
       });
@@ -423,8 +798,6 @@
   };
 
   start();
-})();
 </script>
 </body>
 </html>
-   <script src="https://cdn.jsdelivr.net/npm/three@0.143.0/build/three.min.js"></   <script src="https://cdn.jsdelivr.net/npm/mindar-image-three.prod.js"></script>   <script src="http://localhost:PORT"></script>
